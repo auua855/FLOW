@@ -1872,25 +1872,64 @@
                             pos.needsUpdate = true;
                         }
 
-                        // --- 山との衝突回避 (AI) ---
-                        // シンプルな回避: 近くに山があったら向きを変える
-                        if (obj.userData.guestType !== 'orb') { // オーブは透過的で神秘的なので回避しなくてよい？指示は「エイや飛び魚、人型」
-                            const avoidDist = 40; // 回避開始距離
+                        // --- Mountain Avoidance System ---
+                        // Guests avoid mountains to prevent collisions/jittering.
+                        if (obj.userData.guestType !== 'orb') {
+                            const avoidRadius = 60; // Detection range
                             mountains.forEach(mt => {
                                 const dx = obj.position.x - mt.position.x;
                                 const dz = obj.position.z - mt.position.z;
                                 const distSq = dx * dx + dz * dz;
-                                const mtRadius = 30 * mt.scale.x;
-                                if (distSq < (mtRadius + avoidDist) ** 2) {
-                                    // 山から離れる方向に力を加える（位置を直接ずらす簡易実装）
+                                const mtRadius = 30 * mt.scale.x; // Mountain base radius
+                                const safeDist = mtRadius + avoidRadius;
+
+                                if (distSq < safeDist * safeDist) {
                                     const dist = Math.sqrt(distSq);
-                                    if (dist > 0.1) {
-                                        const pushX = dx / dist;
-                                        const pushZ = dz / dist;
-                                        obj.position.x += pushX * 0.5;
-                                        obj.position.z += pushZ * 0.5;
-                                        // 向きも少し変える
-                                        obj.rotation.y += 0.05;
+                                    if (dist < 0.1) return; // Prevent division by zero
+
+                                    const penetration = safeDist - dist;
+                                    const pushFactor = Math.min(penetration * 0.05, 1.0); // Smooth push strength
+
+                                    // Normalized direction AWAY from mountain
+                                    const bx = dx / dist;
+                                    const bz = dz / dist;
+
+                                    if (obj.userData.guestType === 'walker' || obj.userData.guestType === 'npcRay') {
+                                        // Self-propelled: STEER away (Rotate Y)
+                                        // Calculate target angle away from mountain
+                                        const targetAngle = Math.atan2(dx, dz); // Math.atan2(x, y) => Angle from North? No, standard atan2(y, x).
+                                        // But here we want angle in XZ plane.
+                                        // THREE.js rotation.y: 0 is -Z? No, depends on camera.
+                                        // Let's use simple logic: If obstacle is to the Left, Turn Right.
+
+                                        // Vector to Obstacle (relative to Guest Fwd)
+                                        // Guest Fwd:
+                                        const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(obj.quaternion);
+                                        // Vector To Obstacle: (-dx, -dz) (Guest to Mountain is -dx, -dz. Wait dx = obj - mt. So dx is Vector FROM Mt TO Obj. So dx IS the Escape Vector)
+                                        // Correct. dx/dz is direction AWAY from mountain.
+
+                                        // We want to turn TOWARDS (dx, dz).
+                                        const desiredAngle = Math.atan2(dx, dz); // atan2(x, y) results in angle from Y axis (Z) in clockwise?
+                                        // Standard atan2(y, x) is angle from X axis.
+                                        // Here we use (x, z).
+
+                                        // Let's just Apply Torque to align Fwd with (dx, dz).
+                                        // Current Fwd: (fwd.x, fwd.z).
+                                        // Target Fwd: (bx, bz).
+                                        // Cross product Y = fwd.z * bx - fwd.x * bz.
+                                        // If positve -> Turn Left?
+                                        const crossY = fwd.z * bx - fwd.x * bz;
+                                        obj.rotation.y += crossY * 0.1; // Turn towards safety
+
+                                        // Also apply slight position push to prevent getting stuck
+                                        obj.position.x += bx * 0.1;
+                                        obj.position.z += bz * 0.1;
+
+                                    } else {
+                                        // Rail-movers (Bird/Fish): VISCOUS PUSH (Slide orbit)
+                                        // Push away smoothly to shift the orbit center
+                                        obj.position.x += bx * pushFactor;
+                                        obj.position.z += bz * pushFactor;
                                     }
                                 }
                             });

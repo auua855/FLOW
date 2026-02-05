@@ -5,15 +5,14 @@ const ASSETS = [
     './icon_192.png',
     './icon_512.png',
     './three.min.js',
-    './昼　無色の呼吸.mp3',
-    './昼　静寂のガラス庭園.mp3',
-    './昼　静寂のポリリズム.mp3',
-    './昼　静寂の呼吸.mp3',
-    './夜　1.mp3',
-
-    './夜　静かなままの世界.mp3',
-    './夜　静かなままの世界2.mp3',
-    './夜　静けさの海へ.mp3'
+    './day musho.mp3',
+    './day gal.mp3',
+    './day por.mp3',
+    './day koky.mp3',
+    './night 1.mp3',
+    './night seka.mp3',
+    './night seka2.mp3',
+    './night umi.mp3'
 ];
 
 self.addEventListener('install', (event) => {
