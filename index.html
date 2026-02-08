@@ -1219,34 +1219,49 @@
                 selectionRing.material.opacity = 0; // Hide ring while chasing
             }
 
-            // 2. Chase Physics (Velocity Based)
+            // 2. Chase Physics (Velocity Based - Improved Stability)
             if (isChasing && chaseTarget) {
                 const targetPos = chaseTarget.position;
 
-                // Determine Forward Vector from Velocity
-                let targetFwd = new THREE.Vector3(0, 0, 1);
-                const vel = chaseTarget.userData.velocity;
-
-                // Use velocity if significant, else fallback to rotation
-                if (vel && vel.lengthSq() > 0.000001) {
-                    targetFwd.copy(vel).normalize();
-                } else {
-                    targetFwd.applyQuaternion(chaseTarget.quaternion).normalize();
+                // Initialize smoothed chase direction if needed
+                if (!ray.userData.chaseDir) {
+                    ray.userData.chaseDir = new THREE.Vector3(0, 0, 1).applyQuaternion(ray.quaternion);
                 }
 
-                // Ideal Position: 25m behind, 6m above
-                const idealPos = targetPos.clone().addScaledVector(targetFwd, -25).add(new THREE.Vector3(0, 6, 0));
+                // Determine Moving Direction from Velocity
+                const vel = chaseTarget.userData.velocity;
+                const targetDir = new THREE.Vector3();
 
-                // Avoid underground
-                if (idealPos.y < -30) idealPos.y = -30;
+                // Use velocity if moving significant amount, else fallback to orientation
+                if (vel && vel.lengthSq() > 0.0001) {
+                    targetDir.copy(vel).normalize();
+                } else {
+                    targetDir.set(0, 0, 1).applyQuaternion(chaseTarget.quaternion);
+                }
 
-                // Move Ray (LERP position for smooth lock)
-                ray.position.lerp(idealPos, 0.15);
+                // Smoothly interpolate chase direction (Stability: Ignore small wiggles)
+                // Very slow lerp (0.02) to filter out jitter
+                ray.userData.chaseDir.lerp(targetDir, 0.02);
+                ray.userData.chaseDir.normalize();
 
-                // Rotation: Look at TARGET
+                // Ideal Position: Far Behind (120 units - 5x Distance)
+                const chaseDist = 120.0;
+
+                // Position is strictly BEHIND the smoothed direction
+                // Maintain target's Y height (plus slight offset if needed, but keeping simple)
+                const idealPos = targetPos.clone().addScaledVector(ray.userData.chaseDir, -chaseDist);
+
+                // Ensure we don't go underground, but allow high flight
+                if (idealPos.y < 10) idealPos.y = 10; // Minimum safety height
+
+                // Move Ray (LERP position for smooth catch-up)
+                ray.position.lerp(idealPos, 0.1);
+
+                // Rotation: Look at TARGET (Smoothly)
+                const lookTarget = targetPos.clone();
                 const dummy = new THREE.Object3D();
                 dummy.position.copy(ray.position);
-                dummy.lookAt(targetPos);
+                dummy.lookAt(lookTarget);
                 ray.quaternion.slerp(dummy.quaternion, 0.1);
 
                 // Visuals
@@ -1564,15 +1579,51 @@
                         ray.rotation.y += cameraRotationSpeed;
                     }
 
-                    // Vector計算によるカメラ追従 (Chase Camera)
-                    // Offset: (0, Height, -Dist) relative to Ray (Behind)
-                    const offset = new THREE.Vector3(0, CONFIG.cameraHeight, -CONFIG.cameraDist);
-                    // Rotate offset by Ray's Y rotation
-                    offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), ray.rotation.y);
-                    // Target Pos = Ray Pos + Offset
-                    const targetPos = ray.position.clone().add(offset);
+                    // Chase Camera (Improved Vertical Control)
+                    let targetPos;
+                    if (isChasing) {
+                        // Vertical Orbit based on InputY (-1: Behind, 1: Top)
+                        // Map InputY (-1 to 1) to Pitch Angle (0 to 80 degrees)
+                        const inputClamped = Math.max(-1, Math.min(1, smoothedInput.y));
+                        const angleRatio = (inputClamped + 1) * 0.5; // 0.0 to 1.0
+                        const pitchAngle = angleRatio * (Math.PI / 2 * 0.9); // Max 81 degrees (Almost Top-Down)
 
-                    camera.position.lerp(targetPos, 0.1);
+                        const orbitDist = 40.0; // Distance from Ray
+                        const camOffset = new THREE.Vector3(0, 0, 0);
+
+                        // Spherical Coordinates (Y=Up, Z=Back)
+                        // Pitch 0: Y=0, Z=orbitDist (Behind)
+                        // Pitch 90: Y=orbitDist, Z=0 (Top)
+                        camOffset.y = Math.sin(pitchAngle) * orbitDist;
+                        camOffset.z = Math.cos(pitchAngle) * orbitDist; // Z positive is behind in local space? No, Z negative is forward.
+                        // Ray Forward is +Z? Wait.
+                        // Standard Three.js: Camera looking at -Z.
+                        // If Ray looks +Z (Forward).
+                        // Behind is -Z? No, Ray local Z-axis.
+                        // If Ray moves translateZ(speed). Forward is +Z local.
+                        // So Behind is -Z local.
+                        // Let's re-verify:
+                        // CONFIG.cameraDist used Vector(0, H, -Dist).
+                        // If -Dist is Behind, then Behind is -Z.
+                        // So Z = -1 * cos(pitch) * dist.
+                        camOffset.z = -Math.cos(pitchAngle) * orbitDist;
+
+                        // Apply Ray's Yaw (Y-rotation)
+                        camOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), ray.rotation.y);
+
+                        targetPos = ray.position.clone().add(camOffset);
+                    } else {
+                        // Standard Flight Camera
+                        const offset = new THREE.Vector3(0, CONFIG.cameraHeight, -CONFIG.cameraDist);
+                        // Rotate offset by Ray's Y rotation (Manual yaw following)
+                        // Note: Previous code used offset.applyMatrix4(ray.matrixWorld) which includes Pitch/Roll.
+                        // We likely want to ignore Pitch/Roll for camera stability, or follow it?
+                        // Original code: offset.applyMatrix4(ray.matrixWorld).
+                        // Let's stick to original behavior for manual flight.
+                        targetPos = offset.applyMatrix4(ray.matrixWorld);
+                    }
+
+                    camera.position.lerp(targetPos, CONFIG.cameraLag);
                     camera.lookAt(ray.position);
                 }
                 if (speedDisplay) speedDisplay.innerText = "0 km/h";
