@@ -1003,6 +1003,11 @@
 
             bird.userData.flySpeed = 0.2 + Math.random() * 0.1;
             bird.userData.phase = Math.random() * 100;
+            // Straight Flight Logic Init
+            bird.userData.direction = new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
+            bird.userData.targetDirection = bird.userData.direction.clone();
+            bird.userData.turnTimer = Math.random() * 300;
+            bird.rotation.y = Math.atan2(bird.userData.direction.x, bird.userData.direction.z);
 
             addGuest(bird, 'bird');
         }
@@ -1244,25 +1249,29 @@
                 ray.userData.chaseDir.lerp(targetDir, 0.02);
                 ray.userData.chaseDir.normalize();
 
+                // --- Smoothed Target Position (Fix L/R wobble) ---
+                if (!ray.userData.smoothedTargetPos) ray.userData.smoothedTargetPos = chaseTarget.position.clone();
+                ray.userData.smoothedTargetPos.lerp(chaseTarget.position, 0.05);
+
                 // Ideal Position: Far Behind (120 units - 5x Distance)
                 const chaseDist = 120.0;
 
                 // Position is strictly BEHIND the smoothed direction
                 // Maintain target's Y height (plus slight offset if needed, but keeping simple)
-                const idealPos = targetPos.clone().addScaledVector(ray.userData.chaseDir, -chaseDist);
+                const idealPos = ray.userData.smoothedTargetPos.clone().addScaledVector(ray.userData.chaseDir, -chaseDist);
 
                 // Ensure we don't go underground, but allow high flight
                 if (idealPos.y < 10) idealPos.y = 10; // Minimum safety height
 
                 // Move Ray (LERP position for smooth catch-up)
-                ray.position.lerp(idealPos, 0.1);
+                ray.position.lerp(idealPos, 0.05);
 
                 // Rotation: Look at TARGET (Smoothly)
-                const lookTarget = targetPos.clone();
+                const lookTarget = ray.userData.smoothedTargetPos.clone();
                 const dummy = new THREE.Object3D();
                 dummy.position.copy(ray.position);
                 dummy.lookAt(lookTarget);
-                ray.quaternion.slerp(dummy.quaternion, 0.1);
+                ray.quaternion.slerp(dummy.quaternion, 0.05);
 
                 // Visuals
                 ray.material.emissive.setHex(0xa020f0);
@@ -1463,8 +1472,12 @@
                             if (obj === selectionRing && potentialTarget) {
                                 isChasing = true;
                                 chaseTarget = potentialTarget;
-                                uiElement.innerText = "追跡モード中";
+                                uiElement.innerText = "CHASE (Tap Ray to Exit)";
                                 AudioSys.start();
+                                // Reset Smoothing
+                                ray.userData.chaseDir = null;
+                                ray.userData.smoothedTargetPos = null;
+                                ray.userData.cameraPitch = 0;
                                 return;
                             }
 
@@ -1476,8 +1489,12 @@
                                 if (ray.position.distanceTo(obj.position) < 80.0) {
                                     isChasing = true;
                                     chaseTarget = obj;
-                                    uiElement.innerText = "追跡モード中";
+                                    uiElement.innerText = "CHASE (Tap Ray to Exit)";
                                     AudioSys.start();
+                                    // Reset Smoothing
+                                    ray.userData.chaseDir = null;
+                                    ray.userData.smoothedTargetPos = null;
+                                    ray.userData.cameraPitch = 0;
                                     return;
                                 }
                             }
@@ -1579,47 +1596,43 @@
                         ray.rotation.y += cameraRotationSpeed;
                     }
 
-                    // Chase Camera (Improved Vertical Control)
+                    // Chase Camera (Improved Vertical Control - Accumulative)
                     let targetPos;
                     if (isChasing) {
-                        // Vertical Orbit based on InputY (-1: Behind, 1: Top)
-                        // Map InputY (-1 to 1) to Pitch Angle (0 to 80 degrees)
-                        const inputClamped = Math.max(-1, Math.min(1, smoothedInput.y));
-                        const angleRatio = (inputClamped + 1) * 0.5; // 0.0 to 1.0
-                        const pitchAngle = angleRatio * (Math.PI / 2 * 0.9); // Max 81 degrees (Almost Top-Down)
+                        // Initialize Camera Pitch if needed
+                        if (ray.userData.cameraPitch === undefined) ray.userData.cameraPitch = 0;
 
-                        const orbitDist = 40.0; // Distance from Ray
+                        // Accumulate Input for Pitch (Slide to adjust, hold to keep)
+                        // InputY: -1 (Down/Back) to +1 (Up/Top)
+                        // User wants: Slide Up -> Top View. Slide Down -> Behind View.
+                        // So Positive Input increases Pitch.
+                        if (Math.abs(smoothedInput.y) > 0.05) {
+                            ray.userData.cameraPitch += smoothedInput.y * 0.03;
+                        }
+                        // Clamp Pitch: 0 (Behind) to 1.4 (Top-Down, approx 80 deg)
+                        ray.userData.cameraPitch = Math.max(0, Math.min(1.4, ray.userData.cameraPitch));
+
+                        const pitchAngle = ray.userData.cameraPitch; // 0 to 1.4 radians
+
+                        const orbitDist = 40.0;
                         const camOffset = new THREE.Vector3(0, 0, 0);
 
-                        // Spherical Coordinates (Y=Up, Z=Back)
-                        // Pitch 0: Y=0, Z=orbitDist (Behind)
-                        // Pitch 90: Y=orbitDist, Z=0 (Top)
+                        // Spherical Coords
                         camOffset.y = Math.sin(pitchAngle) * orbitDist;
-                        camOffset.z = Math.cos(pitchAngle) * orbitDist; // Z positive is behind in local space? No, Z negative is forward.
-                        // Ray Forward is +Z? Wait.
-                        // Standard Three.js: Camera looking at -Z.
-                        // If Ray looks +Z (Forward).
-                        // Behind is -Z? No, Ray local Z-axis.
-                        // If Ray moves translateZ(speed). Forward is +Z local.
-                        // So Behind is -Z local.
-                        // Let's re-verify:
-                        // CONFIG.cameraDist used Vector(0, H, -Dist).
-                        // If -Dist is Behind, then Behind is -Z.
-                        // So Z = -1 * cos(pitch) * dist.
-                        camOffset.z = -Math.cos(pitchAngle) * orbitDist;
+                        camOffset.z = -Math.cos(pitchAngle) * orbitDist; // -Z is Behind
 
-                        // Apply Ray's Yaw (Y-rotation)
+                        // Apply Ray's Yaw
                         camOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), ray.rotation.y);
 
                         targetPos = ray.position.clone().add(camOffset);
+
+                        // Force Up vector stability
+                        ray.up.set(0, 1, 0);
+
                     } else {
                         // Standard Flight Camera
+                        // Reset Pitch when exiting chase? Or keep it? keeping is fine.
                         const offset = new THREE.Vector3(0, CONFIG.cameraHeight, -CONFIG.cameraDist);
-                        // Rotate offset by Ray's Y rotation (Manual yaw following)
-                        // Note: Previous code used offset.applyMatrix4(ray.matrixWorld) which includes Pitch/Roll.
-                        // We likely want to ignore Pitch/Roll for camera stability, or follow it?
-                        // Original code: offset.applyMatrix4(ray.matrixWorld).
-                        // Let's stick to original behavior for manual flight.
                         targetPos = offset.applyMatrix4(ray.matrixWorld);
                     }
 
@@ -1657,7 +1670,10 @@
 
                     if (isChasing) {
                         // Chase Logic Active - Skip Manual Input
-                        smoothedInput.set(0, 0); // Reset input
+                        // Chase Logic Active
+                        // smoothedInput.set(0, 0); // REMOVED: Allow input for Camera Control
+                        if (!isTouching) smoothedInput.lerp(new THREE.Vector2(0, 0), 0.1); // Decay input if not touching
+                        else smoothedInput.lerp(inputVector, 0.1); // Update input for camera
 
                         // Collision Checks
                         if (renderer.info.render.frame % 2 === 0) {
@@ -1870,10 +1886,48 @@
                             }
                             obj.rotation.z = Math.sin(time * 5 + obj.userData.phase) * 0.05;
                         } else if (obj.userData.guestType === 'bird') {
-                            obj.position.x += Math.sin(time + obj.userData.phase) * obj.userData.flySpeed;
-                            obj.position.z += Math.cos(time + obj.userData.phase) * obj.userData.flySpeed;
-                            obj.rotation.y = -(time + obj.userData.phase);
-                            obj.rotation.z = Math.sin(time * 10) * 0.2;
+                            // Straight Flight with Slow Turns
+                            if (!obj.userData.direction) {
+                                // Fallback init
+                                obj.userData.direction = new THREE.Vector3(1, 0, 0);
+                                obj.userData.targetDirection = new THREE.Vector3(1, 0, 0);
+                                obj.userData.turnTimer = 0;
+                            }
+
+                            // Timer for changing direction
+                            obj.userData.turnTimer--;
+                            if (obj.userData.turnTimer <= 0) {
+                                // Pick new target direction (Scatter approx 45 degrees)
+                                const angle = (Math.random() - 0.5) * 1.5; // +/- 0.75 rad (45 deg)
+                                const currentAngle = Math.atan2(obj.userData.direction.x, obj.userData.direction.z);
+                                const newAngle = currentAngle + angle;
+                                obj.userData.targetDirection.set(Math.sin(newAngle), 0, Math.cos(newAngle)).normalize();
+                                obj.userData.turnTimer = 200 + Math.random() * 400; // 3-10 seconds
+                            }
+
+                            // Smooth Turn
+                            const prevDir = obj.userData.direction.clone();
+                            obj.userData.direction.lerp(obj.userData.targetDirection, 0.005); // Very slow turn
+                            obj.userData.direction.normalize();
+
+                            // Move
+                            obj.position.addScaledVector(obj.userData.direction, obj.userData.flySpeed);
+
+                            // Rotate
+                            const targetRotY = Math.atan2(obj.userData.direction.x, obj.userData.direction.z);
+                            obj.rotation.y = targetRotY;
+
+                            // Bank (Roll) based on turn
+                            // Calculate turn rate
+                            const turnRate = obj.userData.direction.x * prevDir.z - obj.userData.direction.z * prevDir.x; // Cross product Y component approx
+                            // Bank: Turn Left -> Roll Left (positive Z? No, Roll Left is +Z? let's check)
+                            // Right hand rule Z axis out (back).
+                            // Roll Left (Wing Down Left) -> +Z.
+                            // Turn Left -> Positive Cross Y.
+                            // So Roll = TurnRate * factor.
+                            // Let's add oscillation
+                            obj.rotation.z = (turnRate * 800) + Math.sin(time * 10) * 0.1;
+
                             // はばたき
                             if (obj.userData.lWing && obj.userData.rWing) {
                                 const flap = Math.sin(time * 15) * 0.5;
